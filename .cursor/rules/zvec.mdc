@@ -1,0 +1,88 @@
+---
+description: Semantic search over the project knowledge base (summaries/) via the zvec CLI
+globs:
+  - "**/*.md"
+  - "summaries/**"
+alwaysApply: false
+---
+
+# zvec — semantic search skill
+
+`zvec-tool` is a **CLI** for semantic search over the project knowledge base in `summaries/`.
+It is **not an MCP server** — the search runs as a plain command. Use it to find relevant docs,
+regulations, and business-process notes before doing broad greps.
+
+- **Model:** `intfloat/multilingual-e5-small` (384-dim, multilingual)
+- **Indexed scope:** only `.md` files under `PROJECT_ROOT/summaries/` by default
+- **No global DB lock:** `withCollection` opens/closes the DB per call, so `search` never blocks `index`
+
+## When to use
+
+Call `zvec search` when you need to:
+- find how a business process is described/documented
+- locate documentation for a specific entity (справочник/документ/регистр)
+- find related regulations or concepts
+- get context before changing project configuration
+
+Do **not** use zvec to search source code or config files — it only indexes `summaries/`. For code,
+run a normal grep instead.
+
+## Search command
+
+Run from the project root (the parent of `zvec-tool/`):
+
+```bash
+node zvec-tool/zvec.mjs search "<query in RU or EN>" --top 8
+```
+
+| Flag | Description |
+|------|-------------|
+| `--top N` | Number of results (default: 8) |
+| `--json` | Machine-readable JSON output |
+
+### Examples
+
+```bash
+node zvec-tool/zvec.mjs search "учёт товаров на складе" --top 5
+node zvec-tool/zvec.mjs search "регистр накопления остатки" --top 8
+node zvec-tool/zvec.mjs search "порядок закрытия месяца" --top 6
+node zvec-tool/zvec.mjs search "документ поступление" --json
+```
+
+## Reading results
+
+Each result contains:
+- file path under `summaries/`
+- `score` — cosine similarity (higher = more relevant; `> 0.7` is strong)
+- a 220-char text preview
+
+Results are sorted by descending `score`.
+
+## Status & diagnostics
+
+```bash
+node zvec-tool/zvec.mjs status     # index status: docCount, active version
+node zvec-tool/zvec.mjs doctor     # detailed diagnostics (probes DB, shows lock holder)
+```
+
+- `docCount: 0` → index is empty: run `node zvec-tool/zvec.mjs index`.
+- exit code `2` (`ZVEC_BUSY`) → another process holds the lock; wait or stop it.
+- stale results on valid queries → rebuild: `node zvec-tool/zvec.mjs index`.
+
+## Rebuild the index
+
+```bash
+# Full reindex of summaries/ (staging → atomic promote; active DB stays intact until done)
+node zvec-tool/zvec.mjs index
+```
+
+## File layout
+
+```
+.zvec/
+├── active.json      ← manifest of the active version (read for status)
+├── session.lock     ← ephemeral lock (do not edit by hand)
+└── versions/        ← DB versions (3 most recent are kept)
+summaries/           ← the .md files being indexed (source data)
+zvec-tool/           ← the tool itself (not indexed)
+```

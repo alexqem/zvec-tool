@@ -1,0 +1,24 @@
+{
+  "name": "zvec-tool",
+  "version": "2.0.0",
+  "type": "module",
+  "description": "CLI semantic search for 1C project knowledge base (multilingual-e5-small, versioned DB)",
+  "bin": {
+    "zvec": "zvec.mjs"
+  },
+  "scripts": {
+    "status": "node zvec.mjs status",
+    "doctor": "node zvec.mjs doctor",
+    "index": "node zvec.mjs index",
+    "versions": "node zvec.mjs versions",
+    "search": "node zvec.mjs search",
+    "lint": "node scripts/lint.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@zvec/zvec": "^0.5.0"
+  },
+  "allowScripts": {
+    "@zvec/zvec@0.5.0": true
+  }
+}
