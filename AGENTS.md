@@ -1,83 +1,93 @@
 # Agent Instructions
 
-`zvec-tool` — это **CLI** семантического поиска по базе знаний проекта (папка `summaries/`).
-Это **не MCP-сервер**: MCP-инструментов (`search_project_knowledge`, ресурсов и промптов) в репозитории нет. Поиск выполняется запуском CLI-команды из корня проекта.
+`zvec-tool` is a **CLI** for semantic search over a project knowledge base.
+It vectorizes documents (regulations, process docs, notes) into a local vector DB so that
+LLM assistants can retrieve relevant context **by meaning**, not by keywords.
 
-> [!IMPORTANT]
-> > **Что индексируется:** только файлы `.md` из `PROJECT_ROOT/summaries/` (значение по умолчанию; настраивается через `ZVEC_INDEX_ROOT` / `ZVEC_EXTENSIONS`). Исходный код, конфиги (`package.json`, `tsconfig.json` и т.п.) и обычная документация вне `summaries/` **не индексируются**.
-> > Для поиска по исходному коду/конфигам **не используйте zvec** — делайте обычный grep.
+## What gets indexed
 
-## Как искать (главное)
-
-Из корня проекта (`PROJECT_ROOT`, по умолчанию — родитель каталога `zvec-tool/`):
+You must tell zvec **which directory** to index — there is no hardcoded default.
+Pass the path to the `index` command, or set `ZVEC_INDEX_ROOT`:
 
 ```bash
-node zvec-tool/zvec.mjs search "<запрос на русском или английском>" --top 8
+node zvec-tool/zvec.mjs index ./docs
+node zvec-tool/zvec.mjs index --root ./docs
+# or: ZVEC_INDEX_ROOT=./docs node zvec-tool/zvec.mjs index
 ```
 
-Результат содержит: путь к файлу в `summaries/`, `score` (косинусное сходство) и превью (220 символов).
-Значения `score > 0.7` считаются высоко релевантными. Результаты отсортированы по убыванию `score`.
+By default only `*.md` files are indexed (`ZVEC_EXTENSIONS`). Source code, configs
+(`package.json`, `tsconfig.json`, …) are not indexed unless you add their extensions.
+To search source code or configs, **do not use zvec** — run a normal grep instead.
 
-## Рабочий процесс
+## How to search
 
-1. Для вопросов о бизнес-процессах, регламентах, документации проекта — начните с `zvec search`.
-2. Сопоставление считать полезным, только если результат прямо относится к запросу. Если попадания лишь отдалённо связаны — считайте результат недостаточным и уточните запрос.
-3. Если `zvec` возвращает ошибку или 0 результатов, явно скажите об этом, затем выполните целевой grep по нужным каталогам.
-4. Для поиска по исходному коду, именам символов, конфигам — используйте grep напрямую, минуя zvec.
-5. Если и zvec, и grep ничего не дали, прямо сообщите пользователю, что информация не найдена, и попросите уточнить (файл, символ, модуль).
-
-## Команды CLI
-
-| Команда | Назначение |
-|---------|------------|
-| `node zvec-tool/zvec.mjs index` | Полная переиндексация (`summaries/`) — staging → атомарный promote |
-| `node zvec-tool/zvec.mjs search "<q>" [--top N] [--json]` | Семантический поиск (по умолчанию `--top 8`) |
-| `node zvec-tool/zvec.mjs status` | Краткий статус индекса (`docCount`, активная версия) |
-| `node zvec-tool/zvec.mjs doctor` | Детальная диагностика (probe DB + кто держит lock) |
-| `node zvec-tool/zvec.mjs versions` | Список версий БД |
-| `node zvec-tool/zvec.mjs rollback <ver-id>` | Откат активной версии |
-| `node zvec-tool/zvec.mjs backups` | Список резервных копий |
-| `node zvec-tool/zvec.mjs backup` | Создать резервную копию вручную |
-
-## Статус и диагностика
+From the project root (the parent of `zvec-tool/`):
 
 ```bash
-node zvec-tool/zvec.mjs status   # docCount, активная версия
-node zvec-tool/zvec.mjs doctor   # probe DB + информация о lock
+node zvec-tool/zvec.mjs search "<query in RU or EN>" --top 8
 ```
 
-- `docCount: 0` — индекс пуст, запустите `index`.
-- `exists: false` / активной версии нет — запустите `index`.
-- Поиск возвращает 0 по осмысленным запросам — возможно, индекс устарел; перестройте `index`.
-- Exit-код `2` (`ZVEC_BUSY`) — другой процесс держит session lock; подождите или завершите его.
+Each result contains: the file path, a `score` (cosine similarity), and a 220-char preview.
+Scores `> 0.7` are strong. Results are sorted by descending `score`.
 
-## Архитектура (коротко)
+## Workflow
 
-- **CLI-first.** Точка входа — `zvec.mjs`. Никаких долгоживущих серверных процессов и глобальных блокировок БД.
-- **Windows-safe.** `withCollection(fn)` открывает коллекцию, вызывает `fn` и **закрывает немедленно** — файл БД не держится открытым между вызовами. Поэтому `search` и `status` не конфликтуют с `index`.
-- **Версионирование БД.** `index` пишет в **staging**-версию (`versions/v-<timestamp>/`), а активная БД не трогается до завершения. После успешного `probeDb` манифест `active.json` атомарно переключается (promote). Прерванное индексирование не ломает рабочую БД.
-- **Авто-откат.** Если активная версия не открывается/повреждена, `db.mjs` пытается найти и переключиться на предыдущую рабочую версию (`findFallbackVersion` → `rollbackTo`).
-- **Stale lock.** Мёртвый PID в `session.lock` определяется через `kill(pid, 0)` и сбрасывается автоматически; `rmSync` использует `maxRetries` для обхода временных блокировок Windows.
-- **Эмбеддинги.** Python-воркер `embed_worker.py` (модель `intfloat/multilingual-e5-small`, 384-dim, ~120 МБ). При `index` воркер живёт в памяти; при `search` (CLI) поднимается одноразовый oneshot-процесс и сразу убивается. Альтернатива — `embed_rubert_worker.py` под `sergeyzh/rubert-large-uncased-sts` (подключается вручную).
+1. For questions about business processes, regulations, or project documentation, start with `zvec search`.
+2. Treat a match as useful only if it directly relates to the query; if hits are only tangential, treat the result as insufficient and refine the query.
+3. If `zvec` errors or returns 0 results, say so explicitly, then do a focused grep over the relevant directories.
+4. For source code, symbol names, and configs, use grep directly — zvec only indexes the configured document folder.
+5. If both zvec and grep find nothing, tell the user explicitly and ask for clarification (file, symbol, module).
 
-## Конфигурация (переменные окружения)
+## CLI commands
 
-| Переменная | По умолчанию | Описание |
-|------------|-------------|----------|
-| `PROJECT_ROOT` | родитель `zvec-tool/` | Корень проекта |
-| `ZVEC_INDEX_ROOT` | `PROJECT_ROOT/summaries` | Каталог для индексирования |
-| `ZVEC_EMBEDDING_MODEL` | `intfloat/multilingual-e5-small` | Модель HuggingFace |
-| `ZVEC_EMBEDDING_DIMENSION` | `384` | Размерность вектора |
-| `ZVEC_EMBED_QUERY_PREFIX` | `query: ` | Префикс запроса (e5) |
-| `ZVEC_EMBED_DOC_PREFIX` | `passage: ` | Префикс документа (e5) |
-| `ZVEC_PYTHON` | `python` | Python-исполняемый файл |
-| `ZVEC_CHUNK_SIZE` | `1600` | Размер чанка (символы) |
-| `ZVEC_CHUNK_OVERLAP` | `0` | Перекрытие чанков |
-| `ZVEC_EXTENSIONS` | `[".md"]` | Расширения индексируемых файлов |
-| `ZVEC_IGNORE_DIRS` | см. `lib/constants.mjs` | Игнорируемые каталоги |
-| `ZVEC_EXCLUDE_FILES` | см. `lib/constants.mjs` | Исключаемые имена файлов |
-| `ZVEC_LOCK_WAIT_MS` | `30000` | Ожидание session lock (мс) |
-| `ZVEC_EMBED_TIMEOUT_MS` | `120000` | Таймаут одного эмбеддинга (мс) |
-| `ZVEC_EMBED_STARTUP_MS` | `180000` | Таймаут запуска Python-воркера (мс) |
+| Command | Purpose |
+|---------|---------|
+| `node zvec-tool/zvec.mjs index <path>` | Build / rebuild the index of the given directory (staging → atomic promote) |
+| `node zvec-tool/zvec.mjs search "<q>" [--top N] [--json]` | Semantic search (default `--top 8`) |
+| `node zvec-tool/zvec.mjs status` | Index status (`docCount`, active version) |
+| `node zvec-tool/zvec.mjs doctor` | Diagnostics (probes DB, shows lock holder) |
+| `node zvec-tool/zvec.mjs versions` | List DB versions |
+| `node zvec-tool/zvec.mjs rollback <ver-id>` | Roll back the active version |
+| `node zvec-tool/zvec.mjs backups` / `backup` | List / create a backup |
 
-Все дефолты — в `lib/constants.mjs` (single source of truth); env-переопределения — в `lib/config.mjs`.
+## Status & diagnostics
+
+```bash
+node zvec-tool/zvec.mjs status   # docCount, active version
+node zvec-tool/zvec.mjs doctor   # probe DB + lock info
+```
+
+- `docCount: 0` → index is empty: run `index <path>`.
+- `exists: false` / no active version → run `index <path>`.
+- Exit code `2` (`ZVEC_BUSY`) → another process holds the session lock; wait or stop it.
+
+## Architecture (brief)
+
+- **CLI-first.** Entry point is `zvec.mjs`. No long-running server processes, no global DB lock.
+- **Windows-safe.** `withCollection(fn)` opens the collection, calls `fn`, and **closes immediately** — the DB file is never held open between calls, so `search` never blocks `index`.
+- **Versioned DB.** `index` writes to a **staging** version (`versions/v-<timestamp>/`); the active DB is untouched until completion. After a successful `probeDb`, the `active.json` manifest is switched atomically (promote). An interrupted index never breaks the working DB.
+- **Auto-rollback.** If the active version fails to open or is corrupt, `db.mjs` finds and switches to a previous working version (`findFallbackVersion` → `rollbackTo`).
+- **Stale lock.** A dead PID in `session.lock` is detected via `kill(pid, 0)` and cleared automatically; `rmSync` retries up to 5 times to work around transient Windows locks.
+- **Embeddings.** Python worker `embed_worker.py` (model `intfloat/multilingual-e5-small`, 384-dim, ~120 MB). During `index` the worker stays in memory; during CLI `search` a one-shot process is spawned and killed right after. Alternative: `embed_rubert_worker.py` for `sergeyzh/rubert-large-uncased-sts` (wired manually).
+
+## Configuration (environment variables)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ZVEC_INDEX_ROOT` | _(none — required)_ | Directory to index (or pass `<path>` to `index`) |
+| `PROJECT_ROOT` | parent of `zvec-tool/` | Project root |
+| `ZVEC_EMBEDDING_MODEL` | `intfloat/multilingual-e5-small` | HuggingFace model |
+| `ZVEC_EMBEDDING_DIMENSION` | `384` | Vector dimension |
+| `ZVEC_EMBED_QUERY_PREFIX` | `query: ` | Query prefix (e5) |
+| `ZVEC_EMBED_DOC_PREFIX` | `passage: ` | Document prefix (e5) |
+| `ZVEC_PYTHON` | `python` | Python executable |
+| `ZVEC_CHUNK_SIZE` | `1600` | Chunk size (chars) |
+| `ZVEC_CHUNK_OVERLAP` | `0` | Chunk overlap |
+| `ZVEC_EXTENSIONS` | `[".md"]` | Indexed file extensions |
+| `ZVEC_IGNORE_DIRS` | see `lib/constants.mjs` | Ignored directories |
+| `ZVEC_EXCLUDE_FILES` | see `lib/constants.mjs` | Excluded file names |
+| `ZVEC_LOCK_WAIT_MS` | `30000` | Session lock wait (ms) |
+| `ZVEC_EMBED_TIMEOUT_MS` | `120000` | Per-embedding timeout (ms) |
+| `ZVEC_EMBED_STARTUP_MS` | `180000` | Python worker startup timeout (ms) |
+
+All defaults live in `lib/constants.mjs` (single source of truth); env overrides are applied in `lib/config.mjs`.

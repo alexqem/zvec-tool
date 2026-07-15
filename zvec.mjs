@@ -18,6 +18,7 @@ import { applyProjectEnv } from "./lib/env.mjs";
 applyProjectEnv();
 
 import fs from "fs";
+import path from "path";
 import { EXIT, LOG_PREFIX, SEARCH, TIMEOUT_MS } from "./lib/constants.mjs";
 import { getDbPath, getDocCount, withCollection } from "./lib/db.mjs";
 import { parseCommand, parseSearchArgs } from "./lib/cli/parse-args.mjs";
@@ -40,7 +41,8 @@ Usage:
   node zvec.mjs <command> [options]
 
 Commands:
-  index                Build / rebuild the vector index (staging → promote)
+  index [path]         Build / rebuild the vector index (staging → promote)
+    --root <path>      Index directory (or pass <path> positionally / ZVEC_INDEX_ROOT)
   search <query>       Search the index
     --top <N>          Return top N results (default: ${SEARCH.TOPK_DEFAULT})
     --json             Output JSON instead of text
@@ -53,7 +55,7 @@ Commands:
 
 Environment:
   PROJECT_ROOT         Project root directory (default: parent of zvec-tool)
-  ZVEC_INDEX_ROOT      Directory to index (default: PROJECT_ROOT/summaries)
+  ZVEC_INDEX_ROOT      Directory to index (required; or pass <path> to the index command)
   ZVEC_EMBEDDING_MODEL Hugging Face model (default: intfloat/multilingual-e5-small)
   ZVEC_PYTHON          Python executable (default: python)
   ZVEC_CHUNK_SIZE      Chunk size in chars (default: 1600)
@@ -105,8 +107,29 @@ async function cmdSearch(query, topk, asJson) {
     return output;
 }
 
-async function cmdIndex() {
-    return withSessionLock("index", TIMEOUT_MS.INDEX_LOCK, () => runFullReindex());
+async function cmdIndex(rest) {
+    const indexRoot = resolveIndexRoot(rest);
+    if (!indexRoot) {
+        throw new Error(
+            "Не указан каталог для индексации. Передайте путь одним из способов:\n" +
+            "  node zvec.mjs index <путь>\n" +
+            "  node zvec.mjs index --root <путь>\n" +
+            "или задайте переменную окружения ZVEC_INDEX_ROOT."
+        );
+    }
+    return withSessionLock("index", TIMEOUT_MS.INDEX_LOCK, () => runFullReindex({ indexRoot }));
+}
+
+/** Разрешает каталог индексации: флаг --root, позиционный аргумент или env ZVEC_INDEX_ROOT. */
+function resolveIndexRoot(rest) {
+    let root = process.env.ZVEC_INDEX_ROOT || null;
+    for (let i = 0; i < rest.length; i++) {
+        const a = rest[i];
+        if (a === "--root" && rest[i + 1]) root = rest[++i];
+        else if (a.startsWith("--root=")) root = a.slice("--root=".length);
+        else if (!a.startsWith("--")) root = a;
+    }
+    return root ? path.resolve(root) : null;
 }
 
 // ── Entry point ───────────────────────────────
@@ -141,7 +164,7 @@ try {
         console.log(await cmdSearch(query, topk, json));
 
     } else if (cmd === "index") {
-        console.log(JSON.stringify(await cmdIndex(), null, 2));
+        console.log(JSON.stringify(await cmdIndex(rest), null, 2));
 
     } else {
         console.error(USAGE);
